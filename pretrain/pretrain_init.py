@@ -44,20 +44,12 @@ python pretrain.py \
 # %%
 import os
 import sys
-import signal
 import argparse
 import json
 import time
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Tuple, Dict, Union, Optional
-
-# 禁用TorchText的废弃警告
-try:
-    import torchtext
-    torchtext.disable_torchtext_deprecation_warning()
-except:
-    pass
 
 import scanpy as sc
 import numpy as np
@@ -69,17 +61,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 from datasets import Dataset, load_dataset, concatenate_datasets
-import gc
 
-# 处理Broken Pipe错误
-def _handle_sigpipe(signum, frame):
-    """处理SIGPIPE信号，避免Broken Pipe错误导致程序崩溃"""
-    sys.stderr.close()
-    sys.stdout.close()
-    sys.exit(0)
-
-# 注册SIGPIPE信号处理器
-signal.signal(signal.SIGPIPE, _handle_sigpipe)
 
 sys.path.insert(0, "../")
 import scgpt as scg
@@ -89,6 +71,7 @@ from scgpt.tokenizer import GeneVocab, random_mask_value
 from scgpt.scbank import DataBank
 from scgpt.utils import MainProcessOnly
 from scgpt import logger
+
 
 # torch.autograd.set_detect_anomaly(True)
 
@@ -682,9 +665,9 @@ train_loader = DataLoader(
     sampler=train_sampler,
     collate_fn=collator,
     drop_last=False,
-    num_workers=min(len(os.sched_getaffinity(0)), args.batch_size, 8),
+    num_workers=min(len(os.sched_getaffinity(0)), args.batch_size),
     pin_memory=True,
-    prefetch_factor=2,
+    prefetch_factor=4,
 )
 valid_sampler = (
     DistributedSampler(valid_dataset, shuffle=False)
@@ -697,9 +680,8 @@ valid_loader = DataLoader(
     sampler=valid_sampler,
     collate_fn=collator,
     drop_last=False,
-    num_workers=min(4, len(os.sched_getaffinity(0))),
+    num_workers=min(len(os.sched_getaffinity(0)), args.eval_batch_size),
     pin_memory=True,
-    persistent_workers=False,
 )
 
 
@@ -868,39 +850,39 @@ def train(model: nn.Module, train_loader: DataLoader, epoch: int) -> None:
 
         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
             # 不再根据训练模式区分不同的模型调用方式
-            output_dict = model(
-                input_gene_ids,
-                input_values,
-                src_key_padding_mask=src_key_padding_mask,
-                CLS=USE_CLS,
+                output_dict = model(
+                    input_gene_ids,
+                    input_values,
+                    src_key_padding_mask=src_key_padding_mask,
+                    CLS=USE_CLS,
                 CCE=USE_CCE,
-                MVC=MVC,
-            )
-            output_values = output_dict["mlm_output"]
-
-            positions_to_match = input_values.eq(
-                args.mask_value
-            )  # the postions to predict
-            loss = loss_mse = criterion(
-                output_values, target_values, positions_to_match
-            )
-            writer.add_scalar("train/mse", loss_mse, global_iter)
-            if USE_CLS:
-                target_labels = data_dict["celltypes"]
-                loss_cls = criterion_cls(output_dict["cls_output"], target_labels)
-                loss = loss + loss_cls
-                writer.add_scalar("train/cls", loss_cls, global_iter)
-            if USE_CCE:
-                loss_cce = 10 * output_dict["loss_cce"]
-                loss = loss + loss_cce
-                writer.add_scalar("train/cce", loss_cce, global_iter)
-            if MVC:
-                loss_mvc = criterion(
-                    output_dict["mvc_output"], target_values, positions_to_match
+                    MVC=MVC,
                 )
-                loss = loss + loss_mvc
-                writer.add_scalar("train/mvc", loss_mvc, global_iter)
-            writer.add_scalar("train/loss", loss, global_iter)
+                output_values = output_dict["mlm_output"]
+
+                positions_to_match = input_values.eq(
+                    args.mask_value
+                )  # the postions to predict
+                loss = loss_mse = criterion(
+                    output_values, target_values, positions_to_match
+                )
+                writer.add_scalar("train/mse", loss_mse, global_iter)
+                if USE_CLS:
+                    target_labels = data_dict["celltypes"]
+                    loss_cls = criterion_cls(output_dict["cls_output"], target_labels)
+                    loss = loss + loss_cls
+                    writer.add_scalar("train/cls", loss_cls, global_iter)
+                if USE_CCE:
+                    loss_cce = 10 * output_dict["loss_cce"]
+                    loss = loss + loss_cce
+                    writer.add_scalar("train/cce", loss_cce, global_iter)
+                if MVC:
+                    loss_mvc = criterion(
+                        output_dict["mvc_output"], target_values, positions_to_match
+                    )
+                    loss = loss + loss_mvc
+                    writer.add_scalar("train/mvc", loss_mvc, global_iter)
+                writer.add_scalar("train/loss", loss, global_iter)
 
             # 移除使用generative_training的代码块
             # (原本尝试使用cell_emb进行生成的部分)
@@ -970,14 +952,8 @@ def train(model: nn.Module, train_loader: DataLoader, epoch: int) -> None:
 
         # immediately eval and save
         if batch % args.save_interval == 0 and batch > 0:
-            # 只在小批次是save_interval的整数倍时进行保存
-            should_save = (batch % (args.save_interval * 3) == 0)
-            eval_and_save(model, valid_loader, global_iter, save=should_save)
+            eval_and_save(model, valid_loader, global_iter)
             model.train()  # important, reset to train mode
-            
-            # 强制释放内存
-            gc.collect()
-            torch.cuda.empty_cache()
 
 
 def evaluate(model: nn.Module, valid_loader: DataLoader) -> Dict[str, torch.Tensor]:
@@ -998,18 +974,18 @@ def evaluate(model: nn.Module, valid_loader: DataLoader) -> Dict[str, torch.Tens
 
             with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
                 # 统一模型调用方式
-                output_dict = model(
-                    input_gene_ids,
-                    input_values,
-                    src_key_padding_mask=src_key_padding_mask,
-                    CLS=False,  # evaluation does not need CLS or CCE
-                    CCE=False,
-                    MVC=False,
-                )
-                output_values = output_dict["mlm_output"]
-                positions_to_match = input_values.eq(args.mask_value)
+                    output_dict = model(
+                        input_gene_ids,
+                        input_values,
+                        src_key_padding_mask=src_key_padding_mask,
+                        CLS=False,  # evaluation does not need CLS or CCE
+                        CCE=False,
+                        MVC=False,
+                    )
+                    output_values = output_dict["mlm_output"]
+                    positions_to_match = input_values.eq(args.mask_value)
 
-                loss = criterion(output_values, target_values, positions_to_match)
+            loss = criterion(output_values, target_values, positions_to_match)
             total_loss += loss.item()
             total_error += masked_relative_error(
                 output_values, target_values, positions_to_match
@@ -1031,11 +1007,6 @@ def eval_and_save(
 ) -> None:
     # perform evaluation in distributed data parallel
     val_loss, val_mre = evaluate(model, valid_loader).values()
-    
-    # 在评估后强制进行垃圾回收
-    gc.collect()
-    torch.cuda.empty_cache()
-    
     if IS_DATA_PARALLEL:
         # gather the results from all the processes
         val_loss_list = [torch.zeros_like(val_loss) for _ in range(world_size)]
@@ -1086,10 +1057,6 @@ def eval_and_save(
             )
     if IS_DATA_PARALLEL:
         torch.distributed.barrier()
-        
-    # 再次强制进行垃圾回收
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 # %%

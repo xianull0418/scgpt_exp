@@ -75,3 +75,102 @@
 02:36:28-scGPT-INFO-eval_and_save: Saving the best model to ./save/cellxgene_census_blood-May13-00-17-2025
 02:36:54-scGPT-INFO-train: | epoch   2 | 18200/49776 batches | lr 0.0001 | ms/batch 340.95 | loss 271.39 | mse 135.28 | mre 151104.95 |mvc 136.10 |
 ```
+
+# PBMC3K 单细胞数据处理和分析
+
+本项目包含用于处理和分析PBMC3K单细胞RNA测序数据的Python脚本。从原始数据(pbmc3k_raw.h5ad)到注释数据(pbmc3k_annotated.h5ad)的处理流程以及两者之间的比较分析。
+
+## 脚本说明
+
+### 1. compare_h5ad_files.py
+
+此脚本比较原始的PBMC3k数据与注释后的数据之间的差异，包括：
+- 数据结构和形状
+- 观测(细胞)注释
+- 变量(基因)注释
+- 预处理状态
+- 细胞和基因重叠情况
+
+运行方式：
+```
+python compare_h5ad_files.py
+```
+
+### 2. annotate_pbmc3k.py
+
+此脚本实现从原始数据到注释数据的转换过程，主要步骤包括：
+- 基础质量控制和过滤
+- 数据归一化与log转换
+- 高变基因选择
+- 数据缩放
+- PCA降维
+- 构建邻居图
+- UMAP降维
+- Leiden聚类
+- 细胞类型注释(基于聚类结果)
+
+脚本同时生成处理过程中的可视化结果，保存在figures目录下。
+
+运行方式：
+```
+python annotate_pbmc3k.py
+```
+
+### 3. analyze_pbmc3k.py
+
+此脚本对原始和注释数据进行更深入的分析，包括：
+- 基因重叠分析
+- 聚类和细胞类型分布分析
+- UMAP聚类可视化
+- 标记基因识别与可视化
+- 高变基因分析
+- 基因表达分布比较
+- 细胞间相似性分析
+
+运行方式：
+```
+python analyze_pbmc3k.py
+```
+
+## 处理流程总结
+
+原始数据(raw)到注释数据(annotated)的主要处理步骤：
+
+1. **数据预处理**：
+   - 过滤低质量细胞和基因
+   - 归一化和log转换
+   - 选择高变基因(从32,738个基因减少到约2,078个)
+
+2. **降维与聚类**：
+   - PCA降维
+   - 构建细胞间邻居网络
+   - UMAP降维以可视化
+   - leiden算法聚类
+
+3. **细胞类型注释**：
+   - 基于聚类结果进行自动化注释
+
+4. **统计计算**：
+   - 计算各个基因的统计特征(均值、方差等)
+   - 识别各个聚类的标记基因
+
+## 依赖库
+
+运行这些脚本需要安装以下Python库：
+- scanpy
+- numpy
+- pandas
+- matplotlib
+- seaborn
+- matplotlib-venn (用于分析脚本中的Venn图)
+
+安装命令：
+```
+pip install scanpy numpy pandas matplotlib seaborn matplotlib-venn
+```
+
+## 数据文件
+
+- `/ai/home/jcw/scGPT_new/finetune/data/TAPE/pbmc3k_raw.h5ad`：原始PBMC3k数据
+- `/ai/home/jcw/scGPT_new/finetune/data/TAPE/pbmc3k_annotated.h5ad`：注释后的PBMC3k数据
+
